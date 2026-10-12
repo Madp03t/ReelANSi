@@ -288,8 +288,13 @@ class ANSIViewer(QWidget):
         self.screen_width = 80
         self.screen_height = 25
 
+        # PyInstaller extracts bundled resources to sys._MEIPASS.
+        # When running from source, use the project root instead.
+        resource_root = getattr(
+            sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__))
+        )
         font_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            resource_root,
             "fonts",
             "Px437_IBM_VGA_9x16.ttf",
         )

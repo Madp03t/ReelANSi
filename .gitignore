@@ -2,3 +2,12 @@
 __pycache__/
 *.pyc
 samples/
+mood-board/
+project-art/
+
+# AppImage packaging
+build/
+dist/
+ReelANSi.AppDir/
+*.AppImage
+*.spec

@@ -87,3 +87,11 @@ This is an early development release. Feedback and bug reports are welcome.
 Early development. ANSI rendering, including SAUCE-aware iCE colors,
 mixed textmode folder browsing, progressive playback, and ANSI animation
 playback are working.
+
+## Development Approach
+
+I have experience with programming, including professional and independent projects, but I'm not equally familiar with every language or technology. AI-assisted coding helps bridge those gaps and provides additional tools for developing and exploring solutions.
+
+AI plays a significant role in writing and debugging code, particularly when working with technologies I'm less familiar with.
+
+I determine the project's direction, design, and functionality, and handle testing and evaluation. While AI assists with implementation, the decisions about what gets built, what works, and what gets released remain mine.
