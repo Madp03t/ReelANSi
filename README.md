@@ -11,11 +11,11 @@ ReelANSi is strictly a viewer, not an editor.
 
 ## Download
 
-**[Download ReelANSi v0.1 for Linux](https://github.com/Madp03t/ReelANSi/releases/tag/v0.1)**
+**[Download ReelANSi v0.2 for Linux](https://github.com/Madp03t/ReelANSi/releases/tag/v0.2)**
 
 Available as a portable AppImage for 64-bit Linux (x86_64). No Python or PySide6 installation required.
 
-Download `ReelANSi-v0.1-x86_64.AppImage`, make it executable, and run it.
+Download `ReelANSi-v0.2-x86_64.AppImage`, make it executable, and run it.
 
 This is the current published release. Additional features described below are implemented in the development version and are planned for v0.2. Feedback and bug reports are welcome.
 
@@ -95,10 +95,13 @@ This is the current published release. Additional features described below are i
 
 ## Status
 
-Early development. The published v0.1 AppImage remains available above.
-The development version also includes folder autoplay and static/animated
-WebP export, with PNG export for static artwork. These additions have been
-tested locally and are not yet part of the published v0.1 AppImage.
+ReelANSi v0.2 is available for Linux as a portable AppImage.
+
+ANSI rendering, folder browsing, progressive playback, ansimation,
+autoplay, and static/animated WebP export are working.
+
+Development continues, with a focus on rendering accuracy,
+compatibility, and performance.
 
 ## Development Approach
 
