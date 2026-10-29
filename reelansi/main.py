@@ -8,6 +8,7 @@ Code by Eric Montgomery (Madp03t)
 import os
 import sys
 import re
+import time
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -16,13 +17,16 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QComboBox,
+    QInputDialog,
     QHBoxLayout,
     QVBoxLayout,
     QWidget,
     QScrollArea,
+    QMessageBox,
+    QProgressDialog,
 )
 from PySide6.QtCore import Qt, QTimer, QSettings
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QPainter
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QPainter, QImage
 
 ANSI_COLOR_MAP = {
     30: 0,
@@ -267,12 +271,28 @@ def parse_ansi(text, fixed_width=80, fixed_height=25, ice_colors=False):
 
 
 def looks_animated(text):
-    # Ansimation files commonly use repeated cursor-save sequences as timing
-    # padding, or repeatedly clear/reposition the terminal after drawing begins.
-    if text.count("\x1b[s") >= 10:
+    """Conservatively identify animation-like terminal streams.
+
+    Cursor save/restore is also used by static ANSI art, so a handful of
+    sequences is not evidence of animation. Some animations instead use
+    thousands of repeated saves as modem-era timing padding. Others redraw
+    the screen repeatedly. Uncertain files are labeled STATIC; playback
+    remains available regardless of the label.
+    """
+    saves = text.count("\x1b[s")
+    restores = text.count("\x1b[u")
+
+    # Strong signature of repeated cursor-save timing padding. Require a
+    # substantial imbalance to avoid flagging ordinary paired positioning.
+    if saves >= 1000 and saves >= 5 * max(1, restores):
         return True
-    if text.count("\x1b[2J") >= 2:
+
+    # Repeated full-screen clears are typical of frame-based ansimation.
+    # One initial clear is common in static artwork and doesn't count.
+    clears = len(re.findall(r"\x1b\[(?:2|3)J", text))
+    if clears >= 3:
         return True
+
     return False
 
 
@@ -325,6 +345,33 @@ class ANSIViewer(QWidget):
         self.setMaximumSize(pixel_width, pixel_height)
         self.updateGeometry()
         self.update()
+
+    def render_native_image(self, cells, width, height):
+        """Render the complete logical canvas at native 9x16 VGA dimensions."""
+        image = QImage(width * self.base_cell_width,
+                       height * self.base_cell_height,
+                       QImage.Format.Format_RGB32)
+        image.fill(QColor(*VGA_COLORS[0]))
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, False)
+            native_font = QFont(self.font)
+            native_font.setPixelSize(self.base_cell_height)
+            painter.setFont(native_font)
+            for (x, y), (ch, fg, bg) in cells.items():
+                if not (0 <= x < width and 0 <= y < height):
+                    continue
+                left = x * self.base_cell_width
+                top = y * self.base_cell_height
+                painter.fillRect(left, top, self.base_cell_width,
+                                 self.base_cell_height, QColor(*VGA_COLORS[bg]))
+                painter.setPen(QColor(*VGA_COLORS[fg]))
+                painter.drawText(left, top, self.base_cell_width,
+                                 self.base_cell_height,
+                                 Qt.AlignmentFlag.AlignCenter, ch)
+        finally:
+            painter.end()
+        return image
 
     def set_screen(self, cells, width=None, height=None):
         self.cells = dict(cells)
@@ -384,12 +431,21 @@ class ReelANSI(QMainWindow):
         self.is_playing = False
         self.is_animation = False
         self.ice_colors = False
+        self.autoplay_enabled = False
+        self.autoplay_deadline = None
+        self.autoplay_remaining = None
+        self.autoplay_paused = False
         self.zoom_levels = [0.50, 0.75, 1.00, 1.25, 1.50, 2.00]
         self.zoom_factor = 1.00
         self.fit_to_window = False
 
         self.settings = QSettings("Madp03t", "ReelANSI")
         self.saved_speed = self.settings.value("playback_speed", 9600, type=int)
+        self.static_display_seconds = max(1, self.settings.value("static_display_seconds", 5, type=int))
+
+        self.autoplay_timer = QTimer(self)
+        self.autoplay_timer.setInterval(100)
+        self.autoplay_timer.timeout.connect(self.autoplay_tick)
 
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(16)
@@ -411,6 +467,15 @@ class ReelANSI(QMainWindow):
         open_folder_action.setShortcut("Ctrl+Shift+O")
         open_folder_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_folder_action)
+
+        export_action = QAction("&Export Render...", self)
+        export_action.triggered.connect(self.export_render)
+        file_menu.addAction(export_action)
+
+        options_menu = self.menuBar().addMenu("&Options")
+        duration_action = QAction("Autoplay Static Duration...", self)
+        duration_action.triggered.connect(self.set_static_duration)
+        options_menu.addAction(duration_action)
 
         view_menu = self.menuBar().addMenu("&View")
 
@@ -484,6 +549,12 @@ class ReelANSI(QMainWindow):
         self.restart_button.setToolTip("Restart ANSI animation")
         self.restart_button.clicked.connect(self.restart_playback)
 
+        self.autoplay_button = QPushButton("● Autoplay")
+        self.autoplay_button.setCheckable(True)
+        self.autoplay_button.setToolTip("Automatically play every file in the current folder")
+        self.autoplay_button.toggled.connect(self.toggle_autoplay)
+        self.update_autoplay_button()
+
         self.speed_label = QLabel("Playback")
         self.speed_combo = QComboBox()
         self.normal_speed_options = [
@@ -504,6 +575,7 @@ class ReelANSI(QMainWindow):
 
         playback_layout.addWidget(self.play_button)
         playback_layout.addWidget(self.restart_button)
+        playback_layout.addWidget(self.autoplay_button)
         playback_layout.addStretch(1)
         playback_layout.addWidget(self.speed_label)
         playback_layout.addWidget(self.speed_combo)
@@ -522,6 +594,10 @@ class ReelANSI(QMainWindow):
             "Large ANSI artwork. Scrolling and rendering may require more resources."
         )
         self.large_ansi_warning.hide()
+
+        self.art_type_info = QLabel("")
+        self.art_type_info.setMinimumWidth(115)
+        self.art_type_info.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self.folder_info = QLabel("")
         self.folder_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -557,6 +633,8 @@ class ReelANSI(QMainWindow):
         status_layout.addStretch(1)
         status_layout.addWidget(self.folder_info)
         status_layout.addStretch(1)
+        status_layout.addWidget(self.art_type_info)
+        status_layout.addSpacing(12)
         status_layout.addLayout(nav_layout)
 
         layout.addLayout(status_layout)
@@ -564,6 +642,80 @@ class ReelANSI(QMainWindow):
         self.setCentralWidget(container)
 
         self.restore_maximized = self.settings.value("window_maximized", False, type=bool)
+
+    def update_autoplay_button(self):
+        color = "#55d66b" if self.autoplay_enabled else "#888888"
+        self.autoplay_button.setStyleSheet(f"QPushButton {{ color: {color}; }}")
+
+    def update_art_type(self):
+        if not self.current_file:
+            self.art_type_info.setText("")
+            return
+        label = "ANSIMATION" if self.is_animation else "STATIC"
+        if self.is_playing:
+            label += " · Playing"
+        elif self.autoplay_enabled and self.autoplay_deadline is not None:
+            remaining = max(0, self.autoplay_deadline - time.monotonic())
+            label += f" · {int(remaining + 0.999)}s"
+        elif self.autoplay_enabled and self.autoplay_remaining is not None:
+            label += f" · {int(self.autoplay_remaining + 0.999)}s"
+        elif self.is_animation:
+            label += " · Complete"
+        self.art_type_info.setText(label)
+
+    def set_static_duration(self):
+        seconds, ok = QInputDialog.getInt(
+            self, "Autoplay", "Static artwork display time (seconds):",
+            self.static_display_seconds, 1, 300,
+        )
+        if ok:
+            self.static_display_seconds = seconds
+            self.settings.setValue("static_display_seconds", seconds)
+            if self.autoplay_enabled and self.current_file and not self.is_playing:
+                self.schedule_autoplay_advance(seconds)
+
+    def toggle_autoplay(self, enabled):
+        self.autoplay_enabled = enabled
+        self.update_autoplay_button()
+        self.autoplay_timer.stop()
+        self.autoplay_deadline = None
+        self.autoplay_remaining = None
+        self.autoplay_paused = False
+        if enabled and self.current_file and self.ansi_files:
+            # Autoplay always begins with progressive playback, even for static art.
+            self.restart_playback(auto_play=True)
+        self.update_art_type()
+
+    def schedule_autoplay_advance(self, seconds):
+        if not self.autoplay_enabled or not self.current_file:
+            return
+        self.autoplay_remaining = None
+        self.autoplay_deadline = time.monotonic() + seconds
+        self.autoplay_timer.start()
+        self.update_art_type()
+
+    def autoplay_tick(self):
+        if not self.autoplay_enabled or self.autoplay_deadline is None:
+            return
+        if time.monotonic() >= self.autoplay_deadline:
+            self.autoplay_timer.stop()
+            self.autoplay_deadline = None
+            self.autoplay_next_file()
+        else:
+            self.update_art_type()
+
+    def autoplay_next_file(self):
+        if not self.current_file or not self.ansi_files:
+            return
+        try:
+            index = self.ansi_files.index(self.current_file)
+        except ValueError:
+            return
+        if index + 1 >= len(self.ansi_files):
+            # Finish at the end of the folder instead of looping forever.
+            self.autoplay_button.setChecked(False)
+            return
+        self.load_ansi(self.ansi_files[index + 1])
 
     def populate_speed_combo(self, options, preferred_speed):
         self.speed_combo.blockSignals(True)
@@ -676,7 +828,7 @@ class ReelANSI(QMainWindow):
         files = [
             os.path.join(folder, file)
             for file in os.listdir(folder)
-            if file.lower().endswith((".ans", ".asc", ".flp"))
+            if file.lower().endswith((".ans", ".asc", ".flp", ".ice"))
             or file.lower() == "file_id.diz"
         ]
 
@@ -689,12 +841,161 @@ class ReelANSI(QMainWindow):
             ),
         )
 
+    def export_animated_webp(self, path, baud):
+        """Stream frames into WebP at 10 fps, preserving selected baud timing."""
+        try:
+            from PIL import Image, features, _webp
+        except ImportError as error:
+            raise RuntimeError(
+                "Animated WebP export requires Pillow. Install it with: "
+                "python -m pip install Pillow"
+            ) from error
+        if not features.check("webp") or not hasattr(_webp, "WebPAnimEncoder"):
+            raise RuntimeError("This Pillow installation lacks animated WebP support.")
+
+        total_bytes = len(self.ansi_text)
+        if not total_bytes:
+            raise RuntimeError("No ANSI data to export.")
+
+        # A byte takes approximately 10 bits on a serial link. Sample at 10
+        # frames/second with no 240-frame cap: the cap caused long pauses.
+        duration_ms = max(1, round(total_bytes * 10000 / baud))
+        frame_count = max(2, (duration_ms + 99) // 100)
+        width = self.ansi_width * self.viewer.base_cell_width
+        height = self.ansi_height * self.viewer.base_cell_height
+        if width <= 0 or height <= 0:
+            raise RuntimeError("Invalid animation canvas size.")
+
+        progress = QProgressDialog("Exporting animated WebP…", "Cancel", 0,
+                                   frame_count, self)
+        progress.setWindowTitle("Export Render")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        # Use Pillow's streaming encoder instead of retaining thousands of
+        # full-resolution PIL images in a Python list.
+        encoder = _webp.WebPAnimEncoder(
+            (width, height), 0xFF000000, 0, False, 9, 17, False, False
+        )
+        parser = ANSIStreamParser(self.ansi_width, self.ansi_height, self.ice_colors)
+        previous_byte = 0
+        try:
+            for index in range(frame_count):
+                # Sample the screen at this frame's starting timestamp.
+                frame_ms = min(duration_ms, index * 100)
+                byte_position = min(total_bytes, (frame_ms * baud) // 10000)
+                if byte_position > previous_byte:
+                    parser.feed(self.ansi_text[previous_byte:byte_position])
+                    previous_byte = byte_position
+
+                qimage = self.viewer.render_native_image(
+                    parser.cells, self.ansi_width, self.ansi_height
+                ).convertToFormat(QImage.Format.Format_RGBA8888)
+                frame = Image.frombytes(
+                    "RGBA", (width, height), bytes(qimage.bits()), "raw",
+                    "RGBA", qimage.bytesPerLine(), 1
+                )
+                encoder.add(frame.getim(), frame_ms, True, 100, 100, 4)
+
+                if index % 10 == 0:
+                    progress.setValue(index)
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        raise RuntimeError("Export canceled.")
+
+            # Include final state and flush at the exact duration.
+            if previous_byte < total_bytes:
+                parser.feed(self.ansi_text[previous_byte:])
+            qimage = self.viewer.render_native_image(
+                parser.cells, self.ansi_width, self.ansi_height
+            ).convertToFormat(QImage.Format.Format_RGBA8888)
+            final_frame = Image.frombytes(
+                "RGBA", (width, height), bytes(qimage.bits()), "raw",
+                "RGBA", qimage.bytesPerLine(), 1
+            )
+            encoder.add(final_frame.getim(), duration_ms, True, 100, 100, 4)
+            encoder.add(None, duration_ms + 100, True, 100, 100, 0)
+            data = encoder.assemble("", "", "")
+            if data is None:
+                raise RuntimeError("WebP encoder could not assemble the animation.")
+            with open(path, "wb") as output:
+                output.write(data)
+            progress.setValue(frame_count)
+        finally:
+            progress.close()
+
+    def export_render(self):
+        """Export full-resolution static art or baud-timed animated WebP."""
+        if not self.current_file:
+            QMessageBox.information(self, "Export Render", "Open an artwork file first.")
+            return
+
+        if self.is_animation:
+            baud = self.speed_combo.currentData()
+            if not baud:
+                QMessageBox.warning(self, "Export Render", "Select a playback speed first.")
+                return
+            speed_names = {
+                300: "300baud", 1200: "1200baud", 2400: "2400baud",
+                9600: "9600baud", 14400: "14.4K", 28800: "28.8K",
+                56000: "56K", 115200: "115.2K", 230400: "230.4K",
+            }
+            speed_name = speed_names.get(baud, f"{baud}baud")
+            default_path = os.path.splitext(self.current_file)[0] + f"_{speed_name}.webp"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export Animated Render", default_path,
+                "Animated WebP (*.webp)"
+            )
+            if not path:
+                return
+            if not path.lower().endswith(".webp"):
+                path += ".webp"
+            try:
+                self.export_animated_webp(path, baud)
+            except Exception as error:
+                QMessageBox.warning(self, "Export Render", str(error))
+                return
+            self.statusBar().showMessage(f"Exported {os.path.basename(path)}", 5000)
+            return
+
+        default_path = os.path.splitext(self.current_file)[0] + ".webp"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Render", default_path,
+            "WebP Image (*.webp);;PNG Image (*.png)",
+            "WebP Image (*.webp)")
+        if not path:
+            return
+
+        extension = ".png" if "PNG" in selected_filter else ".webp"
+        if not path.lower().endswith((".png", ".webp")):
+            path += extension
+        image_format = "PNG" if path.lower().endswith(".png") else "WEBP"
+
+        try:
+            # Parse the complete stream without altering the current playback.
+            cells = parse_ansi(self.ansi_text, self.ansi_width,
+                               self.ansi_height, self.ice_colors)
+            max_x = max((x for x, _ in cells), default=self.ansi_width - 1)
+            max_y = max((y for _, y in cells), default=self.ansi_height - 1)
+            width = max(self.ansi_width, max_x + 1)
+            height = max(self.ansi_height, max_y + 1)
+            image = self.viewer.render_native_image(cells, width, height)
+            if not image.save(path, image_format, 100):
+                raise RuntimeError(f"Could not save {image_format} image. "
+                                   "The Qt image format plugin may be unavailable.")
+        except Exception as error:
+            QMessageBox.warning(self, "Export Render", str(error))
+            return
+        self.statusBar().showMessage(f"Exported {os.path.basename(path)}", 5000)
+
     def open_ansi(self):
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Open Textmode File",
             "",
-            "Textmode Files (*.ans *.ANS *.asc *.ASC *.flp *.FLP *.diz *.DIZ)",
+            "Textmode Files (*.ans *.ANS *.asc *.ASC *.flp *.FLP *.ice *.ICE *.diz *.DIZ)",
         )
 
         if filename:
@@ -717,6 +1018,10 @@ class ReelANSI(QMainWindow):
                 self.load_ansi(self.ansi_files[0])
 
     def load_ansi(self, filename):
+        self.autoplay_timer.stop()
+        self.autoplay_deadline = None
+        self.autoplay_remaining = None
+        self.autoplay_paused = False
         self.stop_playback()
 
         with open(filename, "rb") as file:
@@ -745,7 +1050,7 @@ class ReelANSI(QMainWindow):
         name = os.path.basename(filename)
         folder = os.path.dirname(filename)
 
-        if self.is_animation:
+        if self.is_animation or self.autoplay_enabled:
             self.restart_playback(auto_play=True)
         else:
             parsed = parse_ansi(
@@ -784,16 +1089,23 @@ class ReelANSI(QMainWindow):
             self.fit_artwork_to_window()
         self.scroll_area.horizontalScrollBar().setValue(0)
         self.scroll_area.verticalScrollBar().setValue(0)
+        self.update_art_type()
 
     def stop_playback(self):
         self.playback_timer.stop()
         self.is_playing = False
         if hasattr(self, "play_button"):
             self.play_button.setText("▶ Play")
+        if hasattr(self, "art_type_info"):
+            self.update_art_type()
 
     def restart_playback(self, auto_play=False):
         if not self.ansi_text:
             return
+        self.autoplay_timer.stop()
+        self.autoplay_deadline = None
+        self.autoplay_remaining = None
+        self.autoplay_paused = False
 
         self.stop_playback()
         self.stream_parser = ANSIStreamParser(
@@ -810,7 +1122,7 @@ class ReelANSI(QMainWindow):
             self.finish_instantly()
             return
 
-        if auto_play or self.is_animation:
+        if auto_play or self.is_animation or self.autoplay_enabled:
             self.start_playback()
 
     def start_playback(self):
@@ -833,14 +1145,24 @@ class ReelANSI(QMainWindow):
         self.is_playing = True
         self.play_button.setText("⏸ Pause")
         self.playback_timer.start()
+        self.update_art_type()
 
     def toggle_playback(self):
         if not self.ansi_text:
             return
         if self.is_playing:
             self.stop_playback()
+            if self.autoplay_enabled:
+                self.autoplay_paused = True
+                if self.autoplay_deadline is not None:
+                    self.autoplay_remaining = max(0, self.autoplay_deadline - time.monotonic())
+                    self.autoplay_deadline = None
+                    self.autoplay_timer.stop()
         else:
+            self.autoplay_paused = False
             self.start_playback()
+            # Advancing is scheduled only after the file finishes rendering.
+        self.update_art_type()
 
     def finish_instantly(self):
         if not self.ansi_text:
@@ -856,6 +1178,8 @@ class ReelANSI(QMainWindow):
         self.playback_position = len(self.ansi_text)
         self.viewer.set_screen(self.stream_parser.cells, self.ansi_width, self.ansi_height)
         self.stop_playback()
+        if self.autoplay_enabled and not self.autoplay_paused:
+            self.schedule_autoplay_advance(self.static_display_seconds)
 
     def follow_animation_cursor(self):
         if self.stream_parser is None:
@@ -903,6 +1227,8 @@ class ReelANSI(QMainWindow):
 
         if self.playback_position >= len(self.ansi_text):
             self.stop_playback()
+            if self.autoplay_enabled and not self.autoplay_paused:
+                self.schedule_autoplay_advance(self.static_display_seconds)
 
     def playback_speed_changed(self):
         speed = self.speed_combo.currentData()

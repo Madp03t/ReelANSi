@@ -17,7 +17,7 @@ Available as a portable AppImage for 64-bit Linux (x86_64). No Python or PySide6
 
 Download `ReelANSi-v0.1-x86_64.AppImage`, make it executable, and run it.
 
-This is an early development release. Feedback and bug reports are welcome.
+This is the current published release. Additional features described below are implemented in the development version and are planned for v0.2. Feedback and bug reports are welcome.
 
 ## Current Features
 
@@ -36,7 +36,7 @@ This is an early development release. Feedback and bug reports are welcome.
 
 ### Files & Browsing
 
--   Open individual `.ANS`, `.ASC`, `.FLP`, and `FILE_ID.DIZ` files
+-   Open individual `.ANS`, `.ASC`, `.FLP`, `.ICE`, and `FILE_ID.DIZ` files
 -   Open/select a folder containing supported textmode files
 -   Automatically browse supported files in the same folder
 -   `FILE_ID.DIZ` presented first when present
@@ -52,7 +52,7 @@ This is an early development release. Feedback and bug reports are welcome.
 ### Animation & Playback
 
 -   Progressive ANSI stream playback
--   Automatic ansimation detection and playback
+-   Conservative automatic ansimation detection and playback
 -   Play / Pause / Restart controls
 -   Historical modem/BBS playback speeds from 300 baud through 230.4K
 -   Instant playback for non-animated artwork
@@ -61,6 +61,17 @@ This is an early development release. Feedback and bug reports are welcome.
     playback
 -   Automatic viewport following during progressive playback, including
     tall ANSI files
+-   Folder-wide autoplay, including progressive display of static artwork
+-   Configurable pause between files during autoplay (5 seconds by default)
+-   Autoplay stops at the end of the folder
+
+### Export (development version)
+
+-   Export complete static artwork as WebP or PNG
+-   Export ansimations as animated WebP at the selected playback speed
+-   Playback speed included in the suggested animated export filename
+-   Native VGA-resolution export independent of viewport size and zoom
+-   Export progress and cancellation for animated WebP
 
 ### Interface
 
@@ -84,9 +95,10 @@ This is an early development release. Feedback and bug reports are welcome.
 
 ## Status
 
-Early development. ANSI rendering, including SAUCE-aware iCE colors,
-mixed textmode folder browsing, progressive playback, and ANSI animation
-playback are working.
+Early development. The published v0.1 AppImage remains available above.
+The development version also includes folder autoplay and static/animated
+WebP export, with PNG export for static artwork. These additions have been
+tested locally and are not yet part of the published v0.1 AppImage.
 
 ## Development Approach
 
